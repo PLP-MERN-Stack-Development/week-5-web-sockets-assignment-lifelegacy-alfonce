@@ -1,132 +1,109 @@
-// server.js - Main server file for Socket.io chat application
+import { useEffect, useState } from "react";
+import io from "socket.io-client";
 
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const cors = require('cors');
-const dotenv = require('dotenv');
-const path = require('path');
+const socket = io("http://localhost:5000");
 
-// Load environment variables
-dotenv.config();
+function App() {
+  const [username, setUsername] = useState("");
+  const [inputName, setInputName] = useState("");
+  const [message, setMessage] = useState("");
+  const [chat, setChat] = useState([]);
+  const [users, setUsers] = useState([]);
+  const [typingUsers, setTypingUsers] = useState([]);
 
-// Initialize Express app
-const app = express();
-const server = http.createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: process.env.CLIENT_URL || 'http://localhost:5173',
-    methods: ['GET', 'POST'],
-    credentials: true,
-  },
-});
+  useEffect(() => {
+    socket.on("receive_message", (msg) => {
+      setChat((prev) => [...prev, msg]);
+    });
 
-// Middleware
-app.use(cors());
-app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+    socket.on("user_list", (users) => {
+      setUsers(users);
+    });
 
-// Store connected users and messages
-const users = {};
-const messages = [];
-const typingUsers = {};
+    socket.on("user_joined", ({ username }) => {
+      console.log(`${username} joined`);
+    });
 
-// Socket.io connection handler
-io.on('connection', (socket) => {
-  console.log(`User connected: ${socket.id}`);
+    socket.on("user_left", ({ username }) => {
+      console.log(`${username} left`);
+    });
 
-  // Handle user joining
-  socket.on('user_join', (username) => {
-    users[socket.id] = { username, id: socket.id };
-    io.emit('user_list', Object.values(users));
-    io.emit('user_joined', { username, id: socket.id });
-    console.log(`${username} joined the chat`);
-  });
+    socket.on("typing_users", (typingList) => {
+      setTypingUsers(typingList);
+    });
 
-  // Handle chat messages
-  socket.on('send_message', (messageData) => {
-    const message = {
-      ...messageData,
-      id: Date.now(),
-      sender: users[socket.id]?.username || 'Anonymous',
-      senderId: socket.id,
-      timestamp: new Date().toISOString(),
-    };
-    
-    messages.push(message);
-    
-    // Limit stored messages to prevent memory issues
-    if (messages.length > 100) {
-      messages.shift();
+    // Fetch past messages
+    fetch("http://localhost:5000/api/messages")
+      .then((res) => res.json())
+      .then((data) => setChat(data));
+
+    return () => socket.disconnect();
+  }, []);
+
+  const joinChat = () => {
+    if (inputName.trim()) {
+      setUsername(inputName);
+      socket.emit("user_join", inputName);
     }
-    
-    io.emit('receive_message', message);
-  });
+  };
 
-  // Handle typing indicator
-  socket.on('typing', (isTyping) => {
-    if (users[socket.id]) {
-      const username = users[socket.id].username;
-      
-      if (isTyping) {
-        typingUsers[socket.id] = username;
-      } else {
-        delete typingUsers[socket.id];
-      }
-      
-      io.emit('typing_users', Object.values(typingUsers));
+  const sendMessage = (e) => {
+    e.preventDefault();
+    if (message.trim()) {
+      socket.emit("send_message", { message });
+      setMessage("");
+      socket.emit("typing", false);
     }
-  });
+  };
 
-  // Handle private messages
-  socket.on('private_message', ({ to, message }) => {
-    const messageData = {
-      id: Date.now(),
-      sender: users[socket.id]?.username || 'Anonymous',
-      senderId: socket.id,
-      message,
-      timestamp: new Date().toISOString(),
-      isPrivate: true,
-    };
-    
-    socket.to(to).emit('private_message', messageData);
-    socket.emit('private_message', messageData);
-  });
+  const handleTyping = (e) => {
+    setMessage(e.target.value);
+    socket.emit("typing", !!e.target.value.trim());
+  };
 
-  // Handle disconnection
-  socket.on('disconnect', () => {
-    if (users[socket.id]) {
-      const { username } = users[socket.id];
-      io.emit('user_left', { username, id: socket.id });
-      console.log(`${username} left the chat`);
-    }
-    
-    delete users[socket.id];
-    delete typingUsers[socket.id];
-    
-    io.emit('user_list', Object.values(users));
-    io.emit('typing_users', Object.values(typingUsers));
-  });
-});
+  return (
+    <div style={{ padding: "2rem" }}>
+      {!username ? (
+        <div>
+          <h2>Enter Your Username</h2>
+          <input
+            value={inputName}
+            onChange={(e) => setInputName(e.target.value)}
+            placeholder="Username"
+          />
+          <button onClick={joinChat}>Join</button>
+        </div>
+      ) : (
+        <div>
+          <h2>Welcome {username}</h2>
+          <p>Users Online: {users.length}</p>
 
-// API routes
-app.get('/api/messages', (req, res) => {
-  res.json(messages);
-});
+          <form onSubmit={sendMessage}>
+            <input
+              value={message}
+              onChange={handleTyping}
+              placeholder="Type message..."
+            />
+            <button type="submit">Send</button>
+          </form>
 
-app.get('/api/users', (req, res) => {
-  res.json(Object.values(users));
-});
+          {typingUsers.length > 0 && (
+            <p>
+              {typingUsers.join(", ")} {typingUsers.length > 1 ? "are" : "is"} typing...
+            </p>
+          )}
 
-// Root route
-app.get('/', (req, res) => {
-  res.send('Socket.io Chat Server is running');
-});
+          <ul>
+            {chat.map((msg) => (
+              <li key={msg.id}>
+                <strong>{msg.sender}:</strong> {msg.message}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
 
-// Start server
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
-
-module.exports = { app, server, io }; 
+export default App;
